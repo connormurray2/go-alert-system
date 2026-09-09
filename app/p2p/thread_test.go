@@ -3,10 +3,8 @@ package p2p
 import (
 	"bytes"
 	"context"
-	"os"
 	"testing"
 
-	"github.com/bitcoinschema/go-bitcoin"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/stretchr/testify/require"
 
@@ -36,29 +34,19 @@ func (f *fakeStream) Close() error {
 	return nil
 }
 
-// loadTestDependencies loads the test configuration with the genesis alert stored
-// (sequence 0) and the three test keys active
+// loadTestDependencies loads the test configuration and stores the genesis alert
+// (sequence 0), which activates the test genesis keys: the public keys of
+// utils.Key1 to utils.Key5
 func loadTestDependencies(t *testing.T) *config.Config {
 	t.Helper()
 	ctx := context.Background()
-	require.NoError(t, os.Setenv(config.EnvironmentKey, config.EnvironmentTest))
+	t.Setenv(config.EnvironmentKey, config.EnvironmentTest)
 
 	deps, err := config.LoadDependencies(ctx, models.BaseModels, true)
 	require.NoError(t, err)
 	t.Cleanup(func() { deps.CloseAll(ctx) })
 
 	require.NoError(t, models.CreateGenesisAlert(ctx, model.WithAllDependencies(deps)))
-
-	for _, priv := range []string{utils.Key1, utils.Key2, utils.Key3} {
-		var pub string
-		pub, err = bitcoin.PubKeyFromPrivateKeyString(priv, true)
-		require.NoError(t, err)
-
-		key := models.NewPublicKey(model.WithAllDependencies(deps), model.New())
-		key.Key = pub
-		key.Active = true
-		require.NoError(t, key.Save(ctx))
-	}
 	return deps
 }
 
