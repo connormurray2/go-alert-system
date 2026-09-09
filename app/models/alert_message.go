@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math/big"
 
 	"github.com/bitcoinschema/go-bitcoin"
 	"github.com/bitcoinsv/bsvd/bsvec"
@@ -210,6 +211,10 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 	dataHex := hex.EncodeToString(m.data)
 	usedKeys := make(map[string]struct{}, len(m.signatures))
 	for _, sig := range m.signatures {
+		if !isValidCompactSignature(sig) {
+			m.Config().Services.Log.Debugf("signature %x is not a well formed compact signature", sig)
+			return false, nil
+		}
 		b64Sig := base64.StdEncoding.EncodeToString(sig)
 		signer := ""
 		for key, addr := range addressByKey {
@@ -230,6 +235,21 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 	}
 
 	return len(usedKeys) >= RequiredSignatures, nil
+}
+
+// isValidCompactSignature reports whether sig is a well formed compact signature: exactly
+// SignatureLength bytes, a header byte in the Bitcoin signed message range (27 to 34)
+// and R and S each in [1, n-1]. bsvec.RecoverCompact does not range check R and S itself
+// and dereferences a nil pointer when R is a multiple of the curve order (which is a valid
+// x coordinate on secp256k1), so this must run before any recovery is attempted.
+func isValidCompactSignature(sig []byte) bool {
+	if len(sig) != SignatureLength || sig[0] < 27 || sig[0] > 34 {
+		return false
+	}
+	n := bsvec.S256().N
+	r := new(big.Int).SetBytes(sig[1:33])
+	s := new(big.Int).SetBytes(sig[33:])
+	return r.Sign() > 0 && r.Cmp(n) < 0 && s.Sign() > 0 && s.Cmp(n) < 0
 }
 
 // ProcessAlertMessage processes the alert message and converts to an alert message interface

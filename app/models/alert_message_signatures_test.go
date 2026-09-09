@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 
 	"github.com/bitcoinschema/go-bitcoin"
+	"github.com/bitcoinsv/bsvd/bsvec"
 
 	"github.com/bsv-blockchain/go-alert-system/app/models/model"
 	"github.com/bsv-blockchain/go-alert-system/utils"
@@ -127,6 +128,81 @@ func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_NoActiveKeys() {
 	valid, err := alert.AreSignaturesValid(context.Background())
 	ts.Require().ErrorIs(err, ErrNoActivePublicKeys)
 	ts.Require().False(valid)
+}
+
+// TestAlertMessage_AreSignaturesValid_MalformedSignatures rejects signatures that are not well
+// formed compact signatures, without panicking. bsvec.RecoverCompact does not range check R
+// and S: an R equal to the curve order is a valid x coordinate on secp256k1, survives point
+// decompression and then reaches a nil ModInverse, which is a nil pointer dereference.
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_MalformedSignatures() {
+	ctx := context.Background()
+	ts.activateTestKeys(ctx, utils.Key1, utils.Key2, utils.Key3)
+
+	curveOrder := bsvec.S256().N.FillBytes(make([]byte, 32))
+	one := make([]byte, 32)
+	one[31] = 1
+
+	// compact builds a 65 byte compact signature from a header byte and its R and S components
+	compact := func(header byte, r, s []byte) []byte {
+		sig := []byte{header}
+		sig = append(sig, r...)
+		return append(sig, s...)
+	}
+
+	tests := []struct {
+		name string
+		sig  func(valid []byte) []byte
+	}{
+		{
+			name: "R equal to the curve order",
+			sig:  func(_ []byte) []byte { return compact(27, curveOrder, one) },
+		},
+		{
+			name: "R equal to the curve order with the odd parity header",
+			sig:  func(_ []byte) []byte { return compact(28, curveOrder, one) },
+		},
+		{
+			name: "R zero",
+			sig:  func(_ []byte) []byte { return compact(27, make([]byte, 32), one) },
+		},
+		{
+			name: "S zero",
+			sig:  func(valid []byte) []byte { return compact(valid[0], valid[1:33], make([]byte, 32)) },
+		},
+		{
+			name: "S equal to the curve order",
+			sig:  func(valid []byte) []byte { return compact(valid[0], valid[1:33], curveOrder) },
+		},
+		{
+			name: "header byte below the compact range",
+			sig:  func(valid []byte) []byte { return compact(26, valid[1:33], valid[33:]) },
+		},
+		{
+			name: "header byte above the compact range",
+			sig:  func(valid []byte) []byte { return compact(35, valid[1:33], valid[33:]) },
+		},
+		{
+			name: "signature shorter than 65 bytes",
+			sig:  func(valid []byte) []byte { return valid[:SignatureLength-1] },
+		},
+		{
+			name: "signature longer than 65 bytes",
+			sig:  func(valid []byte) []byte { return append(append([]byte{}, valid...), 0) },
+		},
+	}
+
+	for _, tt := range tests {
+		ts.Run(tt.name, func() {
+			alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
+			sigs := alert.signatures
+			sigs[0] = tt.sig(sigs[0])
+			alert.SetSignatures(sigs)
+
+			valid, err := alert.AreSignaturesValid(ctx)
+			ts.Require().NoError(err)
+			ts.Require().False(valid)
+		})
+	}
 }
 
 // TestAlertMessage_ReadRaw_SignatureLength ensures every alert type carries the full signature block
