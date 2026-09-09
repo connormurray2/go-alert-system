@@ -17,6 +17,14 @@ import (
 	"github.com/bsv-blockchain/go-alert-system/utils"
 )
 
+const (
+	// SignatureLength is the byte length of a single compact signature
+	SignatureLength = 65
+
+	// RequiredSignatures is the number of signatures from distinct active keys an alert must carry
+	RequiredSignatures = 3
+)
+
 // AlertMessage is an object representing an alert message
 type AlertMessage struct {
 	// Base model
@@ -155,7 +163,10 @@ func (m *AlertMessage) SetSignatures(sigs [][]byte) {
 	m.signatures = sigs
 }
 
-// AreSignaturesValid checks if the signatures are valid
+// AreSignaturesValid checks that the alert carries at least RequiredSignatures valid
+// signatures over the alert data, each produced by a different active public key.
+// A signature that does not verify against any active key, or a key that signs more
+// than once, invalidates the alert.
 func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 	keys, err := GetActivePublicKey(ctx, nil, model.WithAllDependencies(m.Config()))
 	if err != nil {
@@ -164,42 +175,61 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 		return false, ErrNoActivePublicKeys
 	}
 
-	// Loop through all signatures
-	for _, sig := range m.signatures {
-		b64Sig := base64.StdEncoding.EncodeToString(sig)
-		valid := false
-
-		// Loop through all keys
-		for _, key := range keys {
-
-			// Get the public key
-			var pub *bsvec.PublicKey
-			if pub, err = bitcoin.PubKeyFromString(key.Key); err != nil {
-				return false, err
-			}
-
-			// Get the address
-			var addr *bsvutil.LegacyAddressPubKeyHash
-			if addr, err = bitcoin.GetAddressFromPubKey(pub, true); err != nil {
-				return false, err
-			} else if addr == nil {
-				return false, ErrFailedToConvertPubKey
-			}
-
-			// Verify the message
-			if err = bitcoin.VerifyMessage(addr.String(), b64Sig, hex.EncodeToString(m.data)); err != nil {
-				m.Config().Services.Log.Debugf("error verifying signature %x: %v", sig, err)
-				continue
-			}
-			valid = true
-			break
-		}
-		if !valid {
-			return false, nil
-		}
+	// Require the full signature set up front (an empty set must never validate)
+	if len(m.signatures) < RequiredSignatures {
+		m.Config().Services.Log.Debugf(
+			"alert has %d signatures, %d required", len(m.signatures), RequiredSignatures,
+		)
+		return false, nil
 	}
 
-	return true, nil
+	// Resolve every active key to its address once, de-duplicated by key
+	addressByKey := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if _, exists := addressByKey[key.Key]; exists {
+			continue
+		}
+
+		// Get the public key
+		var pub *bsvec.PublicKey
+		if pub, err = bitcoin.PubKeyFromString(key.Key); err != nil {
+			return false, err
+		}
+
+		// Get the address
+		var addr *bsvutil.LegacyAddressPubKeyHash
+		if addr, err = bitcoin.GetAddressFromPubKey(pub, true); err != nil {
+			return false, err
+		} else if addr == nil {
+			return false, ErrFailedToConvertPubKey
+		}
+		addressByKey[key.Key] = addr.String()
+	}
+
+	// Each signature must verify against an active key that has not already signed
+	dataHex := hex.EncodeToString(m.data)
+	usedKeys := make(map[string]struct{}, len(m.signatures))
+	for _, sig := range m.signatures {
+		b64Sig := base64.StdEncoding.EncodeToString(sig)
+		signer := ""
+		for key, addr := range addressByKey {
+			if verifyErr := bitcoin.VerifyMessage(addr, b64Sig, dataHex); verifyErr == nil {
+				signer = key
+				break
+			}
+		}
+		if signer == "" {
+			m.Config().Services.Log.Debugf("signature %x does not match any active key", sig)
+			return false, nil
+		}
+		if _, used := usedKeys[signer]; used {
+			m.Config().Services.Log.Debugf("key %s signed the alert more than once", signer)
+			return false, nil
+		}
+		usedKeys[signer] = struct{}{}
+	}
+
+	return len(usedKeys) >= RequiredSignatures, nil
 }
 
 // ProcessAlertMessage processes the alert message and converts to an alert message interface
@@ -285,12 +315,8 @@ func (m *AlertMessage) ReadRaw() error {
 
 	alertAndSignature := ak[20:]
 
-	// Assume 3 signatures, maybe disable alert will require 2 (0x09)
-	sigLen := 195
-	switch alertType {
-	case uint32(99):
-		sigLen = 128
-	}
+	// Every alert type carries exactly RequiredSignatures compact signatures
+	sigLen := RequiredSignatures * SignatureLength
 
 	// This is the minimum length this data should be. Signature byte length + 2 bytes
 	// This would imply an informational alert with a message 1 byte long... not practical
@@ -305,12 +331,12 @@ func (m *AlertMessage) ReadRaw() error {
 
 	// Get signature bytes
 	signatures := alertAndSignature[len(alertAndSignature)-sigLen:]
-	var sigs [][]byte
+	sigs := make([][]byte, 0, RequiredSignatures)
 
 	// Loop through all signatures and create an array
-	for i := 0; i < sigLen/65; i++ {
-		sigs = append(sigs, signatures[:65])
-		signatures = signatures[65:]
+	for i := 0; i < RequiredSignatures; i++ {
+		sigs = append(sigs, signatures[:SignatureLength])
+		signatures = signatures[SignatureLength:]
 	}
 
 	dataLen := 20 + len(alert)
