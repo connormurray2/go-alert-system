@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/bitcoinschema/go-bitcoin"
@@ -184,45 +185,23 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	// Resolve every active key to its address once. De-duplicate by address rather than
-	// by the stored string, so the same key stored under two spellings is one signer.
-	keyByAddress := make(map[string]string, len(keys))
-	for _, key := range keys {
-		// Get the public key
-		var pub *bsvec.PublicKey
-		if pub, err = bitcoin.PubKeyFromString(key.Key); err != nil {
-			return false, err
-		}
-
-		// Get the address
-		var addr *bsvutil.LegacyAddressPubKeyHash
-		if addr, err = bitcoin.GetAddressFromPubKey(pub, true); err != nil {
-			return false, err
-		} else if addr == nil {
-			return false, ErrFailedToConvertPubKey
-		}
-		if _, exists := keyByAddress[addr.String()]; !exists {
-			keyByAddress[addr.String()] = key.Key
-		}
+	// Resolve every active key to its address once. Signers are identified by address
+	// rather than by the stored string, so the same key stored under two spellings is one signer.
+	var keyByAddress map[string]string
+	if keyByAddress, err = activeKeyAddresses(keys); err != nil {
+		return false, err
 	}
 
-	// Each signature must verify against an active key that has not already signed
+	// Each signature must come from an active key that has not already signed
 	dataHex := hex.EncodeToString(m.data)
 	usedAddresses := make(map[string]struct{}, len(m.signatures))
 	for _, sig := range m.signatures {
-		if !isValidCompactSignature(sig) {
+		signer, ok := signerAddress(sig, dataHex)
+		if !ok {
 			m.Config().Services.Log.Debugf("signature %x is not a well formed compact signature", sig)
 			return false, nil
 		}
-		b64Sig := base64.StdEncoding.EncodeToString(sig)
-		signer := ""
-		for addr := range keyByAddress {
-			if verifyErr := bitcoin.VerifyMessage(addr, b64Sig, dataHex); verifyErr == nil {
-				signer = addr
-				break
-			}
-		}
-		if signer == "" {
+		if _, active := keyByAddress[signer]; !active {
 			m.Config().Services.Log.Debugf("signature %x does not match any active key", sig)
 			return false, nil
 		}
@@ -233,7 +212,60 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 		usedAddresses[signer] = struct{}{}
 	}
 
-	return len(usedAddresses) >= RequiredSignatures, nil
+	return true, nil
+}
+
+// Execute reads the alert payload and performs its action. It returns
+// ErrUnknownAlertType when this build has no handler for the alert type.
+func (m *AlertMessage) Execute(ctx context.Context) error {
+	ak := m.ProcessAlertMessage()
+	if ak == nil {
+		return fmt.Errorf("%w: %d", ErrUnknownAlertType, m.alertType)
+	}
+	if err := ak.Read(m.GetRawMessage()); err != nil {
+		return err
+	}
+	return ak.Do(ctx)
+}
+
+// activeKeyAddresses maps the address of every active key to the stored key string
+func activeKeyAddresses(keys []*PublicKey) (map[string]string, error) {
+	keyByAddress := make(map[string]string, len(keys))
+	for _, key := range keys {
+		pub, err := bitcoin.PubKeyFromString(key.Key)
+		if err != nil {
+			return nil, err
+		}
+
+		var addr *bsvutil.LegacyAddressPubKeyHash
+		if addr, err = bitcoin.GetAddressFromPubKey(pub, true); err != nil {
+			return nil, err
+		} else if addr == nil {
+			return nil, ErrFailedToConvertPubKey
+		}
+		if _, exists := keyByAddress[addr.String()]; !exists {
+			keyByAddress[addr.String()] = key.Key
+		}
+	}
+	return keyByAddress, nil
+}
+
+// signerAddress recovers the address of the key that produced sig over dataHex.
+// The signature is range checked before recovery is attempted, because
+// bsvec.RecoverCompact dereferences a nil pointer for some malformed inputs.
+func signerAddress(sig []byte, dataHex string) (string, bool) {
+	if !isValidCompactSignature(sig) {
+		return "", false
+	}
+	pub, compressed, err := bitcoin.PubKeyFromSignature(base64.StdEncoding.EncodeToString(sig), dataHex)
+	if err != nil {
+		return "", false
+	}
+	addr, err := bitcoin.GetAddressFromPubKey(pub, compressed)
+	if err != nil || addr == nil {
+		return "", false
+	}
+	return addr.String(), true
 }
 
 // isValidCompactSignature reports whether sig is a well formed compact signature: exactly
