@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bitcoinschema/go-bitcoin"
 	"github.com/mrz1836/go-datastore"
 
 	"github.com/bsv-blockchain/go-alert-system/app/models/model"
@@ -30,7 +31,8 @@ func (a *AlertMessageSetKeys) Read(alert []byte) error {
 	}
 	buf := bytes.NewReader(alert[:])
 
-	// Read the message hash
+	// Read the five compressed public keys
+	seen := make(map[string]struct{}, 5)
 	for key := 0; key < 5; key++ {
 		var pubKey []byte
 		for i := uint64(0); i < 33; i++ {
@@ -40,6 +42,20 @@ func (a *AlertMessageSetKeys) Read(alert []byte) error {
 			}
 			pubKey = append(pubKey, b)
 		}
+
+		// Every key must be a valid public key, otherwise signature validation
+		// would fail for every future alert once the key set is activated
+		pubKeyHex := hex.EncodeToString(pubKey)
+		if _, err := bitcoin.PubKeyFromString(pubKeyHex); err != nil {
+			return fmt.Errorf("%w: key %d: %s", ErrInvalidPubKeyFormat, key, err.Error())
+		}
+
+		// Every key must be distinct, otherwise the effective signing threshold drops
+		if _, exists := seen[pubKeyHex]; exists {
+			return fmt.Errorf("%w: key %d", ErrDuplicatePubKey, key)
+		}
+		seen[pubKeyHex] = struct{}{}
+
 		a.Keys = append(a.Keys, [33]byte(pubKey))
 	}
 
