@@ -214,6 +214,15 @@ func (s *StreamThread) ProcessGotSequenceNumber(msg *SyncMessage) error {
 		return err
 	}
 
+	// Only accept the alert we asked for, otherwise a peer could replay an
+	// old (validly signed) alert such as a superseded set keys alert
+	if a.SequenceNumber != s.myLatestSequence+1 {
+		return fmt.Errorf(
+			"%w: expected %d, got %d from peer %s",
+			ErrUnexpectedSequenceNumber, s.myLatestSequence+1, a.SequenceNumber, s.peer.String(),
+		)
+	}
+
 	// Verify signatures
 	var valid bool
 	if valid, err = a.AreSignaturesValid(s.ctx); err != nil {
@@ -230,6 +239,9 @@ func (s *StreamThread) ProcessGotSequenceNumber(msg *SyncMessage) error {
 	// TODO: For now lets just process all alerts... why not?
 	// if a.GetAlertType() == models.AlertTypeSetKeys || a.GetAlertType() == models.AlertTypeInvalidateBlock {
 	ak := a.ProcessAlertMessage()
+	if ak == nil {
+		return fmt.Errorf("%w: %d", models.ErrUnknownAlertType, a.GetAlertType())
+	}
 	if err = ak.Read(a.GetRawMessage()); err != nil {
 		return err
 	}

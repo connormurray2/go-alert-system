@@ -546,6 +546,10 @@ func (s *Server) Subscribe(ctx context.Context, subscriber *pubsub.Subscription,
 
 		// Process the alert message into the correct interface
 		am := ak.ProcessAlertMessage()
+		if am == nil {
+			s.config.Services.Log.Errorf("%s: %d", models.ErrUnknownAlertType.Error(), ak.GetAlertType())
+			continue
+		}
 		if err = am.Read(ak.GetRawMessage()); err != nil {
 			s.config.Services.Log.Errorf("failed to read message: %s", err.Error())
 			continue

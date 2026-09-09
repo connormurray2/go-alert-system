@@ -11,7 +11,7 @@ import (
 )
 
 // activateTestKeys stores the public keys derived from the given private keys as active keys
-func (ts *TestSuite) activateTestKeys(privateKeys ...string) {
+func (ts *TestSuite) activateTestKeys(ctx context.Context, privateKeys ...string) {
 	for _, priv := range privateKeys {
 		pub, err := bitcoin.PubKeyFromPrivateKeyString(priv, true)
 		ts.Require().NoError(err)
@@ -19,7 +19,7 @@ func (ts *TestSuite) activateTestKeys(privateKeys ...string) {
 		key := NewPublicKey(model.WithAllDependencies(ts.Dependencies), model.New())
 		key.Key = pub
 		key.Active = true
-		ts.Require().NoError(key.Save(context.Background()))
+		ts.Require().NoError(key.Save(ctx))
 	}
 }
 
@@ -39,91 +39,94 @@ func (ts *TestSuite) newSignedTestAlert(signingKeys []string) *AlertMessage {
 	return alert
 }
 
-// TestAlertMessage_AreSignaturesValid covers the signature threshold rules
-func (ts *TestSuite) TestAlertMessage_AreSignaturesValid() {
+// requireSignaturesValid activates the given keys, signs with signingKeys and checks the verdict
+func (ts *TestSuite) requireSignaturesValid(activeKeys, signingKeys []string, want bool) {
 	ctx := context.Background()
+	ts.activateTestKeys(ctx, activeKeys...)
+	alert := ts.newSignedTestAlert(signingKeys)
 
-	ts.Run("three signatures from three distinct active keys are valid", func() {
-		ts.SetupTest()
-		ts.activateTestKeys(utils.Key1, utils.Key2, utils.Key3, utils.Key4, utils.Key5)
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
+	valid, err := alert.AreSignaturesValid(ctx)
+	ts.Require().NoError(err)
+	ts.Require().Equal(want, valid)
+}
 
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().NoError(err)
-		ts.Require().True(valid)
-	})
+// TestAlertMessage_AreSignaturesValid_ThreeDistinctKeys accepts three signatures from three active keys
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_ThreeDistinctKeys() {
+	ts.requireSignaturesValid(
+		[]string{utils.Key1, utils.Key2, utils.Key3, utils.Key4, utils.Key5},
+		[]string{utils.Key1, utils.Key2, utils.Key3},
+		true,
+	)
+}
 
-	ts.Run("zero signatures are rejected", func() {
-		ts.SetupTest()
-		ts.activateTestKeys(utils.Key1, utils.Key2, utils.Key3)
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
-		alert.SetSignatures(nil)
+// TestAlertMessage_AreSignaturesValid_ZeroSignatures rejects an empty signature set
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_ZeroSignatures() {
+	ctx := context.Background()
+	ts.activateTestKeys(ctx, utils.Key1, utils.Key2, utils.Key3)
+	alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
+	alert.SetSignatures(nil)
 
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().NoError(err)
-		ts.Require().False(valid)
-	})
+	valid, err := alert.AreSignaturesValid(ctx)
+	ts.Require().NoError(err)
+	ts.Require().False(valid)
+}
 
-	ts.Run("fewer than three signatures are rejected", func() {
-		ts.SetupTest()
-		ts.activateTestKeys(utils.Key1, utils.Key2, utils.Key3)
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2})
+// TestAlertMessage_AreSignaturesValid_TwoSignatures rejects fewer than three signatures
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_TwoSignatures() {
+	ts.requireSignaturesValid(
+		[]string{utils.Key1, utils.Key2, utils.Key3},
+		[]string{utils.Key1, utils.Key2},
+		false,
+	)
+}
 
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().NoError(err)
-		ts.Require().False(valid)
-	})
+// TestAlertMessage_AreSignaturesValid_SameKeyThreeTimes rejects three signatures from one keyholder
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_SameKeyThreeTimes() {
+	ts.requireSignaturesValid(
+		[]string{utils.Key1, utils.Key2, utils.Key3},
+		[]string{utils.Key1, utils.Key1, utils.Key1},
+		false,
+	)
+}
 
-	ts.Run("three signatures from the same key are rejected", func() {
-		ts.SetupTest()
-		ts.activateTestKeys(utils.Key1, utils.Key2, utils.Key3)
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key1, utils.Key1})
+// TestAlertMessage_AreSignaturesValid_RepeatedKey rejects two distinct keys plus a repeat
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_RepeatedKey() {
+	ts.requireSignaturesValid(
+		[]string{utils.Key1, utils.Key2, utils.Key3},
+		[]string{utils.Key1, utils.Key2, utils.Key1},
+		false,
+	)
+}
 
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().NoError(err)
-		ts.Require().False(valid)
-	})
+// TestAlertMessage_AreSignaturesValid_InactiveKey rejects a signature from a key that is not active
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_InactiveKey() {
+	ts.requireSignaturesValid(
+		[]string{utils.Key1, utils.Key2, utils.Key3},
+		[]string{utils.Key1, utils.Key2, utils.Key4},
+		false,
+	)
+}
 
-	ts.Run("two distinct keys plus a repeat are rejected", func() {
-		ts.SetupTest()
-		ts.activateTestKeys(utils.Key1, utils.Key2, utils.Key3)
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key1})
+// TestAlertMessage_AreSignaturesValid_TamperedData rejects signatures over different data
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_TamperedData() {
+	ctx := context.Background()
+	ts.activateTestKeys(ctx, utils.Key1, utils.Key2, utils.Key3)
+	alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
+	alert.SetRawMessage([]byte{0x05, 'w', 'o', 'r', 'l', 'd'})
+	alert.SerializeData()
 
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().NoError(err)
-		ts.Require().False(valid)
-	})
+	valid, err := alert.AreSignaturesValid(ctx)
+	ts.Require().NoError(err)
+	ts.Require().False(valid)
+}
 
-	ts.Run("a signature from an inactive key is rejected", func() {
-		ts.SetupTest()
-		ts.activateTestKeys(utils.Key1, utils.Key2, utils.Key3)
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key4})
+// TestAlertMessage_AreSignaturesValid_NoActiveKeys returns an error when no keys are active
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_NoActiveKeys() {
+	alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
 
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().NoError(err)
-		ts.Require().False(valid)
-	})
-
-	ts.Run("a signature over different data is rejected", func() {
-		ts.SetupTest()
-		ts.activateTestKeys(utils.Key1, utils.Key2, utils.Key3)
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
-		alert.SetRawMessage([]byte{0x05, 'w', 'o', 'r', 'l', 'd'})
-		alert.SerializeData()
-
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().NoError(err)
-		ts.Require().False(valid)
-	})
-
-	ts.Run("no active keys returns an error", func() {
-		ts.SetupTest()
-		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key2, utils.Key3})
-
-		valid, err := alert.AreSignaturesValid(ctx)
-		ts.Require().ErrorIs(err, ErrNoActivePublicKeys)
-		ts.Require().False(valid)
-	})
+	valid, err := alert.AreSignaturesValid(context.Background())
+	ts.Require().ErrorIs(err, ErrNoActivePublicKeys)
+	ts.Require().False(valid)
 }
 
 // TestAlertMessage_ReadRaw_SignatureLength ensures every alert type carries the full signature block
