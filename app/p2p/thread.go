@@ -214,8 +214,16 @@ func (s *StreamThread) ProcessGotSequenceNumber(msg *SyncMessage) error {
 		return err
 	}
 
-	// Only accept the alert we asked for, otherwise a peer could replay an
-	// old (validly signed) alert such as a superseded set keys alert
+	// Only accept the alert that directly follows what is stored, otherwise a peer
+	// could replay an old (validly signed) alert such as a superseded set keys alert.
+	// The stored latest is authoritative: a thread created by the inbound stream
+	// handler never learns the local sequence (it starts at zero), and pubsub may
+	// have delivered alerts while this sync was in flight.
+	var latest *models.AlertMessage
+	if latest, err = models.GetLatestAlert(s.ctx, nil, model.WithAllDependencies(s.config)); err != nil {
+		return err
+	}
+	s.myLatestSequence = latest.SequenceNumber
 	if a.SequenceNumber != s.myLatestSequence+1 {
 		return fmt.Errorf(
 			"%w: expected %d, got %d from peer %s",
