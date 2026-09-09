@@ -243,18 +243,12 @@ func (s *StreamThread) ProcessGotSequenceNumber(msg *SyncMessage) error {
 	// Serialize the alert data and hash
 	a.SerializeData()
 
-	// Process the alert (if it's a set keys alert)
-	// TODO: For now lets just process all alerts... why not?
-	// if a.GetAlertType() == models.AlertTypeSetKeys || a.GetAlertType() == models.AlertTypeInvalidateBlock {
-	ak := a.ProcessAlertMessage()
-	if ak == nil {
-		return fmt.Errorf("%w: %d", models.ErrUnknownAlertType, a.GetAlertType())
-	}
-	if err = ak.Read(a.GetRawMessage()); err != nil {
-		return err
-	}
+	// Execute the alert. An alert with valid signatures is authentic even when this
+	// build cannot handle it (unknown type, or a payload rejected by a stricter parser),
+	// so it is stored unprocessed for the retry cron and the chain advances rather than
+	// stalling every node on this build at this sequence.
 	a.Processed = true
-	if err = ak.Do(s.ctx); err != nil {
+	if err = a.Execute(s.ctx); err != nil {
 		s.config.Services.Log.Errorf("failed to process alert %d; err: %v", a.SequenceNumber, err.Error())
 		a.Processed = false
 	}

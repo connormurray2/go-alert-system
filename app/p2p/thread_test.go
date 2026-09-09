@@ -50,15 +50,23 @@ func loadTestDependencies(t *testing.T) *config.Config {
 	return deps
 }
 
-// signedAlertBytes builds a fully signed raw alert of the given type and sequence
+// signedAlertBytes builds a fully signed raw informational style alert of the given type and sequence
 func signedAlertBytes(t *testing.T, deps *config.Config, alertType models.AlertType, sequence uint32) []byte {
+	t.Helper()
+	return signedAlertBytesWithMessage(t, deps, alertType, sequence, []byte{0x05, 'h', 'e', 'l', 'l', 'o'})
+}
+
+// signedAlertBytesWithMessage builds a fully signed raw alert with the given payload
+func signedAlertBytesWithMessage(
+	t *testing.T, deps *config.Config, alertType models.AlertType, sequence uint32, message []byte,
+) []byte {
 	t.Helper()
 	alert := models.NewAlertMessage(model.WithAllDependencies(deps), model.New())
 	alert.SetAlertType(alertType)
 	alert.SetVersion(1)
 	alert.SetTimestamp(1)
 	alert.SequenceNumber = sequence
-	alert.SetRawMessage([]byte{0x05, 'h', 'e', 'l', 'l', 'o'})
+	alert.SetRawMessage(message)
 	alert.SerializeData()
 
 	sigs, err := utils.SignWithKeys(alert.GetRawData(), []string{utils.Key1, utils.Key2, utils.Key3})
@@ -99,16 +107,22 @@ func TestStreamThread_ProcessGotSequenceNumber(t *testing.T) {
 		require.Equal(t, uint32(0), thread.myLatestSequence)
 	})
 
-	t.Run("validly signed alert of an unknown type is rejected without panicking", func(t *testing.T) {
+	t.Run("validly signed alert of an unknown type is stored unprocessed and the chain advances", func(t *testing.T) {
 		deps := loadTestDependencies(t)
-		thread := &StreamThread{config: deps, ctx: context.Background(), myLatestSequence: 0, latestSequence: 10}
+		stream := &fakeStream{}
+		thread := &StreamThread{config: deps, ctx: context.Background(), stream: stream, latestSequence: 1}
 
 		msg := &SyncMessage{
 			Type:           IGotSequenceNumber,
 			SequenceNumber: 1,
 			Data:           signedAlertBytes(t, deps, models.AlertType(99), 1),
 		}
-		require.ErrorIs(t, thread.ProcessGotSequenceNumber(msg), models.ErrUnknownAlertType)
+		require.NoError(t, thread.ProcessGotSequenceNumber(msg))
+		require.Equal(t, uint32(1), thread.myLatestSequence)
+
+		saved, err := models.GetAlertMessageBySequenceNumber(context.Background(), 1, model.WithAllDependencies(deps))
+		require.NoError(t, err)
+		require.False(t, saved.Processed, "an alert with no handler must be kept for a later retry")
 	})
 
 	t.Run("replay of an alert already in the datastore is rejected on an inbound stream", func(t *testing.T) {
