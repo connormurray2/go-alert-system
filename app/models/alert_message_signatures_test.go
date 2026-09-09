@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"encoding/binary"
+	"strings"
 
 	"github.com/bitcoinschema/go-bitcoin"
 	"github.com/bitcoinsv/bsvd/bsvec"
@@ -128,6 +129,30 @@ func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_NoActiveKeys() {
 	valid, err := alert.AreSignaturesValid(context.Background())
 	ts.Require().ErrorIs(err, ErrNoActivePublicKeys)
 	ts.Require().False(valid)
+}
+
+// TestAlertMessage_AreSignaturesValid_SameKeyStoredTwice rejects two signatures from one
+// keyholder whose public key is active under two spellings (here lower and upper case hex).
+// Distinctness has to be decided by the key a signature recovers to, not by the stored string.
+func (ts *TestSuite) TestAlertMessage_AreSignaturesValid_SameKeyStoredTwice() {
+	ctx := context.Background()
+	ts.activateTestKeys(ctx, utils.Key1, utils.Key2, utils.Key3)
+
+	pub, err := bitcoin.PubKeyFromPrivateKeyString(utils.Key1, true)
+	ts.Require().NoError(err)
+	key := NewPublicKey(model.WithAllDependencies(ts.Dependencies), model.New())
+	key.Key = strings.ToUpper(pub)
+	key.Active = true
+	ts.Require().NoError(key.Save(ctx))
+
+	// Which spelling a signature is attributed to depends on map iteration order, so
+	// repeat enough times that a string keyed implementation cannot pass by luck
+	for i := 0; i < 32; i++ {
+		alert := ts.newSignedTestAlert([]string{utils.Key1, utils.Key1, utils.Key2})
+		valid, validErr := alert.AreSignaturesValid(ctx)
+		ts.Require().NoError(validErr)
+		ts.Require().False(valid)
+	}
 }
 
 // TestAlertMessage_AreSignaturesValid_MalformedSignatures rejects signatures that are not well

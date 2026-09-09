@@ -184,13 +184,10 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	// Resolve every active key to its address once, de-duplicated by key
-	addressByKey := make(map[string]string, len(keys))
+	// Resolve every active key to its address once. De-duplicate by address rather than
+	// by the stored string, so the same key stored under two spellings is one signer.
+	keyByAddress := make(map[string]string, len(keys))
 	for _, key := range keys {
-		if _, exists := addressByKey[key.Key]; exists {
-			continue
-		}
-
 		// Get the public key
 		var pub *bsvec.PublicKey
 		if pub, err = bitcoin.PubKeyFromString(key.Key); err != nil {
@@ -204,12 +201,14 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 		} else if addr == nil {
 			return false, ErrFailedToConvertPubKey
 		}
-		addressByKey[key.Key] = addr.String()
+		if _, exists := keyByAddress[addr.String()]; !exists {
+			keyByAddress[addr.String()] = key.Key
+		}
 	}
 
 	// Each signature must verify against an active key that has not already signed
 	dataHex := hex.EncodeToString(m.data)
-	usedKeys := make(map[string]struct{}, len(m.signatures))
+	usedAddresses := make(map[string]struct{}, len(m.signatures))
 	for _, sig := range m.signatures {
 		if !isValidCompactSignature(sig) {
 			m.Config().Services.Log.Debugf("signature %x is not a well formed compact signature", sig)
@@ -217,9 +216,9 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 		}
 		b64Sig := base64.StdEncoding.EncodeToString(sig)
 		signer := ""
-		for key, addr := range addressByKey {
+		for addr := range keyByAddress {
 			if verifyErr := bitcoin.VerifyMessage(addr, b64Sig, dataHex); verifyErr == nil {
-				signer = key
+				signer = addr
 				break
 			}
 		}
@@ -227,14 +226,14 @@ func (m *AlertMessage) AreSignaturesValid(ctx context.Context) (bool, error) {
 			m.Config().Services.Log.Debugf("signature %x does not match any active key", sig)
 			return false, nil
 		}
-		if _, used := usedKeys[signer]; used {
-			m.Config().Services.Log.Debugf("key %s signed the alert more than once", signer)
+		if _, used := usedAddresses[signer]; used {
+			m.Config().Services.Log.Debugf("key %s signed the alert more than once", keyByAddress[signer])
 			return false, nil
 		}
-		usedKeys[signer] = struct{}{}
+		usedAddresses[signer] = struct{}{}
 	}
 
-	return len(usedKeys) >= RequiredSignatures, nil
+	return len(usedAddresses) >= RequiredSignatures, nil
 }
 
 // isValidCompactSignature reports whether sig is a well formed compact signature: exactly
